@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from typing import List
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,14 +17,24 @@ PARAMS = {
     'brand.id[0]': 79,  # Toyota
     'model.id[0]': "2104",  # Sequoia
     'damage.not': 0,
-    'country.import.usa.not': 0,  # Авто імпортовані з США
+    'country.import.usa.not': 0,
     'size': 999
 }
+TELEGRAM_MESSAGE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+SEARCH_URL = "https://auto.ria.com/uk/search/?"
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 
-async def notify_telegram(car, add_info=""):
+async def notify_telegram(car: dict, add_info=""):
+    """
+    function to send telegram message to user
+    :param car: dictionary with car data
+    :param add_info: additional information to the message
+    :return:
+    """
     price = car["price"].split(";")  # split price to usd and uah
+
     message = (f"{add_info}Марка автомобіля: {car['brand']}\n"
                f"Ціна: {price[0]}$ - {price[1]}грн\n"
                f"<a href='{car['link']}'>Посилання на автомобіль</a>")
@@ -35,13 +46,13 @@ async def notify_telegram(car, add_info=""):
 
     media = [InputMediaPhoto(convert_photo_to_byte(photo)) for photo in photos]
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    response = requests.get(url)
+    response = requests.get(TELEGRAM_MESSAGE_URL)
     if response.status_code != 200:
         print(response)
 
+    # get all telegram bot members
     telegram_channels_id = set()
-    for result in requests.get(url).json()["result"]:
+    for result in response.json()["result"]:
         if "message" in result and (
                 result["message"]["chat"]["type"] == "group" or result["message"]["chat"]["type"] == "private"):
             telegram_channels_id.add(result["message"]["chat"]["id"])
@@ -53,32 +64,46 @@ async def notify_telegram(car, add_info=""):
             print(e)
 
 
-def get_photos(soup: BeautifulSoup):
+def get_photos(soup: BeautifulSoup) -> List[str]:
     """
-    :param soup:
-    :return:
+    Get photos from html page
+    :param soup: A data structure representing a parsed HTML document
+    :return: List of photos TELEGRAM_MESSAGE_URL
     """
     gallery = soup.find("div", "gallery-order")
     carousel_photo = gallery.findAll("div", "photo-620x465")
+
     photos = []
     for photo in carousel_photo[:PHOTO_NUMBER]:
 
         img_url = photo.find("img")['src']
+        # change image to full size
         separated_string = img_url.split(".")
         separated_string[-2] = separated_string[-2][:-1] + "f"
         img = ".".join(separated_string)
+
         if img[:5] == "https" and img[-3:] != "svg":
             photos.append(img)
 
     return photos
 
 
-def convert_photo_to_byte(photo):
+def convert_photo_to_byte(photo: str) -> bytes:
+    """
+    Convert a photo to byte
+    :param photo: photo SEARCH_URL
+    :return: bytes representation of photo
+    """
     response = requests.get(photo, stream=True)
     return response.content
 
 
-def get_car_data(car, car_id):
+def get_car_data(car: BeautifulSoup) -> dict:
+    """
+    get car data from html page
+    :param car: A data structure representing a parsed HTML document of car
+    :return: return brand, SEARCH_URL to car, photos
+    """
     car_metadata_class = car.find("div", "hide")
 
     brand = car_metadata_class.get('data-mark-name')
@@ -89,15 +114,14 @@ def get_car_data(car, car_id):
 
     photos = get_photos(soup)
 
-    auction_link = get_auction_link(car_id)  # Function to get auction link
+    auction_link = get_auction_link(brand)  # Function to get auction link
 
     return {'brand': brand, 'link': car_link, 'auction_link': auction_link, 'photos': photos}
 
 
 async def scrape_auto_ria():
-    url = "https://auto.ria.com/uk/search/?"
 
-    response = requests.get(url, params=PARAMS)
+    response = requests.get(SEARCH_URL, params=PARAMS)
     soup = BeautifulSoup(response.text, 'html.parser')
     cars = soup.find_all('section', class_='ticket-item')
 
@@ -105,12 +129,13 @@ async def scrape_auto_ria():
         car_id = int(car.get('data-advertisement-id'))
 
         price = (car.find('div', class_='price-ticket').text.strip())
+        # remove unnecessary characters from parsed price
         price = re.sub("\xa0грн| ", "", price).replace("$•", ";")
 
         # Checking if the car is unique
         if check_unique(car_id):
 
-            car_metadata = get_car_data(car, car_id)
+            car_metadata = get_car_data(car)
             car_metadata["price"] = price
             car_metadata["car_id"] = car_id
 
@@ -120,6 +145,7 @@ async def scrape_auto_ria():
         else:
             # If the car is not unique, check for price updates
             stored_car = get_stored_car(car_id)
+            # change bool column for checking if car is sold
             make_car_new(car_id)
 
             if stored_car['price'] != price:
@@ -128,6 +154,7 @@ async def scrape_auto_ria():
                 del stored_car["id"]
                 await notify_telegram(stored_car, "Увага! Змінена ціна на один із автомобілів\n")
 
+    # get all sold car
     old_car = get_all_old_car_id()
     for car_id in old_car:
         stored_car = get_stored_car(car_id[0])
@@ -142,9 +169,6 @@ async def scrape_auto_ria():
 
 
 def get_auction_link(car_id):
-    # Implement logic to get auction link based on the car_id
-    # This could involve additional web scraping or using a different API
-    pass
     return f"https://example_auction.com/{car_id}"
 
 
